@@ -1,0 +1,147 @@
+{
+  "requirement": {
+    "raw": "Build a simple task management web app where users can create, edit, and mark tasks as complete.",
+    "refined": "Refined: Raw requirement: Build a simple task management web app where users can create, edit, and mark tasks as complete.\n",
+    "scope": [
+      "User authentication and authorization",
+      "Core business feature implementation",
+      "Responsive web UI",
+      "End-to-end automated tests"
+    ]
+  },
+  "architecture": {
+    "overview": "Architecture for: Requirement document:\nRefined: Raw requirement: Build a simple task management web app where users can create, edit, and mark tasks as complete.\n\nScope: User authentication and authorization, Core business feature implementation, Responsive web UI, End-to-end automated tests\n",
+    "components": [
+      "API Gateway",
+      "Business Service",
+      "Database",
+      "Web Frontend"
+    ],
+    "techStack": [
+      "Bun + TypeScript",
+      "Hono",
+      "SQLite",
+      "React"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Design database schema",
+      "description": "Create the initial SQL schema based on architecture.",
+      "tag": "backend",
+      "dependencies": [],
+      "acceptanceCriteria": [
+        "Schema file exists",
+        "Tables cover all entities"
+      ],
+      "assignee": "BackendDeveloper",
+      "status": "done",
+      "artifacts": [
+        {
+          "name": "T1_backend.ts",
+          "content": "// Auto-generated backend code for Task: Design database schema\nDescription: Create the initial SQL schema based on architecture.\nAcceptance criteria:\n- Schema file exists\n- Tables cover all entities"
+        }
+      ],
+      "output": "Backend code for Design database schema",
+      "validationErrors": [],
+      "retryCount": 0
+    },
+    {
+      "id": "T2",
+      "title": "Implement REST API",
+      "description": "Build Hono routes and handlers.",
+      "tag": "backend",
+      "dependencies": [
+        "T1"
+      ],
+      "acceptanceCriteria": [
+        "All endpoints respond 200",
+        "Input validation works"
+      ],
+      "assignee": "BackendDeveloper",
+      "status": "done",
+      "artifacts": [
+        {
+          "name": "T2_backend.ts",
+          "content": "OK"
+        }
+      ],
+      "output": "Backend code for Implement REST API\n// Fixed: Missing input validation on POST /resources",
+      "validationErrors": [],
+      "retryCount": 1
+    },
+    {
+      "id": "T3",
+      "title": "Design UI mockups",
+      "description": "Create Figma-style design descriptions.",
+      "tag": "design",
+      "dependencies": [],
+      "acceptanceCriteria": [
+        "Design system defined",
+        "All screens covered"
+      ],
+      "assignee": "Designer",
+      "status": "done",
+      "artifacts": [
+        {
+          "name": "T3_design.md",
+          "content": "# Design spec for Task: Design UI mockups\nDescription: Create Figma-style design descriptions.\nAcceptance criteria:\n- Design system defined\n- All screens covered"
+        }
+      ],
+      "output": "Design artifacts for Design UI mockups",
+      "validationErrors": [],
+      "retryCount": 0
+    },
+    {
+      "id": "T4",
+      "title": "Implement web frontend",
+      "description": "Build React components and pages.",
+      "tag": "frontend",
+      "dependencies": [
+        "T3",
+        "T2"
+      ],
+      "acceptanceCriteria": [
+        "Pages render",
+        "API integration works"
+      ],
+      "assignee": "FrontendDeveloper",
+      "status": "done",
+      "artifacts": [
+        {
+          "name": "T4_frontend.tsx",
+          "content": "// Auto-generated frontend code for Task: Implement web frontend\nDescription: Build React components and pages.\nAcceptance criteria:\n- Pages render\n- API integration works"
+        }
+      ],
+      "output": "Frontend code for Implement web frontend",
+      "validationErrors": [],
+      "retryCount": 0
+    },
+    {
+      "id": "T5",
+      "title": "Write E2E tests",
+      "description": "Cover critical user journeys with E2E tests.",
+      "tag": "test",
+      "dependencies": [
+        "T4"
+      ],
+      "acceptanceCriteria": [
+        "Tests run locally",
+        "Critical paths covered"
+      ],
+      "assignee": "TestDeveloper",
+      "status": "done",
+      "artifacts": [],
+      "output": "E2E tests executed",
+      "validationErrors": [],
+      "retryCount": 0
+    }
+  ],
+  "tests": [
+    "User can sign up and log in",
+    "User can create and list resources",
+    "UI renders on mobile and desktop"
+  ],
+  "finalStatus": "success"
+}

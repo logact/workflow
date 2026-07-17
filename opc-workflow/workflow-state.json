@@ -1,0 +1,38 @@
+{
+  "userRequirement": "添加边缘机器人可以部署在边缘机器上能够机器人作用用户可以在加入IM通讯",
+  "requirement": {
+    "raw": "添加边缘机器人可以部署在边缘机器上能够机器人作用用户可以在加入IM通讯",
+    "refined": "在 OPC IM 系统中新增“边缘机器人（Edge Robot）”能力：用户可在客户端发起请求，在指定的边缘机器上创建机器人，机器人作为房间参与者加入 IM 通讯并进行消息收发。每台边缘机器上部署一个编排器（Orchestrator），作为本机所有机器人的统一管理入口与通信枢纽，职责包括：1）接收并处理用户从客户端发起的机器人创建/管理请求，在本机创建、销毁机器人实例；2）持续监控本机所有机器人的运行状态（存活、健康、异常），并向用户/服务端上报；3）本机所有机器人与 OPC server 之间的通信（MQTT 消息收发、HTTP 调用）一律经由编排器统一转发，机器人不直接连接 server；4）机器人加入 IM 房间后，其消息在通讯中表现为普通参与者消息，可被房间内其他成员接收并产生响应。",
+    "scope": [
+      "边缘编排器（Orchestrator）：部署在边缘机器上，统一管理本机全部机器人实例的生命周期（创建、监控、销毁）",
+      "机器人创建流程：用户在客户端发起创建请求，请求经 OPC server 送达目标边缘机器的编排器，由编排器在本机创建机器人",
+      "通信转发：边缘机器上所有机器人与 OPC server 之间的 MQTT/HTTP 通信均通过编排器转发，机器人不直连 server",
+      "状态监控：编排器监控本机机器人运行状态并上报，用户可查看机器人状态",
+      "IM 集成：机器人作为房间参与者加入 IM 通讯，可收发消息，复用现有消息与参与者模型",
+      "协议契约：新增或变更的 HTTP 路由、MQTT topic、payload schema 及机器人相关领域类型均先在 packages/protocol 中定义，再由 server 与客户端按契约实现（遵循仓库 AGENTS.md 的契约唯一来源约定）"
+    ]
+  },
+  "architecture": {
+    "overview": "在 OPC 中新增边缘机器人体系：每台边缘机器部署一个 Orchestrator，作为本机机器人的生命周期管理者与唯一通信出口。针对“多机器人经单一出口会被 server 视为同一身份”的问题，采用 NAT 式多路复用：Orchestrator 与 OPC server 之间只维持一条以边缘节点凭证认证的 MQTT/HTTP 通道，但每个机器人拥有独立的 participant 身份（robotId）；上下行消息均携带 robotId 路由键（信封 payload 或按 robotId 细分的 topic），Orchestrator 内置路由器维护『本地机器人实例 ↔ robotId ↔ server 端 participant』的映射表，在本机回环总线与上行通道之间做地址转换与分发，语义上等价于 NAT。server 端 Edge Gateway 解复用后，将每个机器人的消息以各自 participant 身份注入现有房间消息流水线，房间成员看到的是各自独立的机器人参与者而非一个出口身份；机器人状态也按 robotId 粒度独立上报与展示。所有 HTTP 路由、MQTT topic、信封 schema 及 Robot/EdgeNode 领域类型先在 packages/protocol 定义，server 与客户端按契约实现。",
+    "components": [
+      "packages/protocol（契约唯一来源）：新增 Robot、RobotStatus、EdgeNode 领域类型（Zod schema 推导 TS 类型）；机器人管理 HTTP 路由（创建/销毁/列表/状态查询，统一入 API_ROUTES）；边缘通道 MQTT topic 约定（上行 edge/{edgeId}/up、下行 edge/{edgeId}/robot/{robotId}/down）与信封 payload schema（{ robotId, kind, payload }）；机器人状态变更 ServerEvent。",
+      "OPC Server — Edge Gateway：编排器接入层。认证边缘节点凭证并维持长连接；接收上行信封，校验该边缘节点对 robotId 的代理授权后解复用，将机器人消息作为对应 participant 的普通房间消息注入现有消息流水线；下行按 robotId 路由到目标边缘机器的通道。",
+      "OPC Server — Robot Registry & Identity Mapping：基于 packages/database 持久化边缘节点、机器人实例及 robotId ↔ participantId 映射；接收客户端创建/管理请求并转发至目标机器的 Orchestrator；聚合状态上报，向客户端提供状态查询与事件推送。",
+      "Orchestrator（边缘侧新部署单元）：本机机器人生命周期管理（创建/销毁/重启）、健康监控与按 robotId 粒度的心跳/异常上报；内置 NAT 式路由器——机器人只连本机回环总线（127.0.0.1 MQTT 或 IPC），路由器维护本地实例 ↔ robotId 映射表，统一经单条上行通道与 server 收发。",
+      "Robot Runtime：运行于边缘机器的机器人实例，仅通过回环总线与 Orchestrator 通信，承载具体业务逻辑，不直接感知 OPC server。",
+      "客户端链路（api-client / mqtt-client / sdk / mobile）：新增机器人创建与状态查询 API 调用（响应经 protocol schema 运行时校验）；房间内机器人渲染为普通参与者（带机器人标识）并展示其在线/健康状态。"
+    ],
+    "techStack": [
+      "TypeScript / Node.js（server、orchestrator、robot runtime 统一技术栈）",
+      "MQTT（mqtt.js + Mosquitto）：单连接 + robotId 信封/topic 多路复用",
+      "Zod：packages/protocol 契约定义与运行时校验",
+      "Drizzle ORM + PostgreSQL：边缘节点、机器人与身份映射持久化",
+      "pnpm monorepo：按 protocol → server → 客户端顺序实施契约",
+      "Docker / docker-compose：边缘 Orchestrator 部署形态"
+    ]
+  },
+  "tasks": [],
+  "tests": [],
+  "finalStatus": "success",
+  "feedback": "编排器与server 的通信还是有点问题，要是这样的话同一台机器上所有的机器人都只是表示为一个人，或者有加什么映射方式类似 路由器转换内网外网的地址？"
+}

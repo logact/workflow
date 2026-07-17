@@ -1,0 +1,15 @@
+{
+  "name": "opc-workflow",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "workflow": "bun run workflow.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
