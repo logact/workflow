@@ -61,6 +61,7 @@ interface WorkflowResult {
   requirement: RequirementDoc;
   architecture: ArchitectureDoc;
   tasks: Task[];
+  testTasks: Task[];
   tests: string[];
   finalStatus: "success" | "failure";
 }
@@ -157,6 +158,7 @@ function saveState(ctx: WorkflowContext, path: string): void {
     requirement: ctx.requirement,
     architecture: ctx.architecture,
     tasks: ctx.tasks,
+    testTasks: ctx.testTasks,
     tests: ctx.tests,
     finalStatus: ctx.finalStatus,
     feedback: ctx.feedback,
@@ -180,6 +182,7 @@ function loadState(path: string): WorkflowContext | null {
     ctx.requirement = parsed.requirement ?? null;
     ctx.architecture = parsed.architecture ?? null;
     ctx.tasks = parsed.tasks ?? [];
+    ctx.testTasks = parsed.testTasks ?? [];
     ctx.tests = parsed.tests ?? [];
     ctx.finalStatus = parsed.finalStatus ?? "success";
     ctx.feedback = parsed.feedback ?? "";
@@ -190,7 +193,7 @@ function loadState(path: string): WorkflowContext | null {
   }
 }
 
-const REWIND_PHASES = ["requirement", "architect", "pm", "test"] as const;
+const REWIND_PHASES = ["requirement", "architect", "test", "pm"] as const;
 type RewindPhase = (typeof REWIND_PHASES)[number];
 
 /**
@@ -202,18 +205,21 @@ function rewindContext(ctx: WorkflowContext, from: string): void {
     requirement: "requirement",
     architect: "architect",
     architecture: "architect",
-    pm: "pm",
-    tasks: "pm",
     test: "test",
     tests: "test",
+    pm: "pm",
+    tasks: "pm",
   };
   const phase = phaseAliases[from.toLowerCase()];
   if (phase) {
     const idx = REWIND_PHASES.indexOf(phase);
     if (idx <= 0) ctx.requirement = null;
     if (idx <= 1) ctx.architecture = null;
-    if (idx <= 2) ctx.tasks = [];
-    if (idx <= 3) ctx.tests = [];
+    if (idx <= 2) {
+      ctx.testTasks = [];
+      ctx.tests = [];
+    }
+    if (idx <= 3) ctx.tasks = [];
     ctx.feedback = "";
     log(
       "WorkflowEngine",
@@ -225,7 +231,7 @@ function rewindContext(ctx: WorkflowContext, from: string): void {
   const task = ctx.tasks.find((t) => t.id === from);
   if (!task) {
     throw new Error(
-      `Unknown --from step "${from}". Use one of: requirement, architect, pm, test, or a task id (e.g. T3).`
+      `Unknown --from step "${from}". Use one of: requirement, architect, test, pm, or a task id (e.g. T3).`
     );
   }
 
@@ -364,52 +370,108 @@ export class MockKimiCLIClient implements KimiCLIClient {
     }
 
     if (lowerSystem.includes("project manager")) {
-      return JSON.stringify([
-        {
-          id: "T1",
-          title: "Design database schema",
-          description: "Create the initial SQL schema based on architecture.",
-          tag: "backend",
-          dependencies: [],
-          acceptanceCriteria: ["Schema file exists", "Tables cover all entities"],
-          assignee: "BackendDeveloper",
+      return JSON.stringify({
+        tasks: [
+          {
+            id: "T1",
+            title: "Design database schema",
+            description: "Create the initial SQL schema based on architecture.",
+            tag: "backend",
+            dependencies: [],
+            acceptanceCriteria: ["Schema file exists", "Tables cover all entities"],
+            assignee: "BackendDeveloper",
+          },
+          {
+            id: "T2",
+            title: "Implement REST API",
+            description: "Build Hono routes and handlers.",
+            tag: "backend",
+            dependencies: ["T1"],
+            acceptanceCriteria: ["All endpoints respond 200", "Input validation works"],
+            assignee: "BackendDeveloper",
+          },
+          {
+            id: "T3",
+            title: "Design UI mockups",
+            description: "Create Figma-style design descriptions.",
+            tag: "design",
+            dependencies: [],
+            acceptanceCriteria: ["Design system defined", "All screens covered"],
+            assignee: "Designer",
+          },
+          {
+            id: "T4",
+            title: "Implement web frontend",
+            description: "Build React components and pages.",
+            tag: "frontend",
+            dependencies: ["T3", "T2"],
+            acceptanceCriteria: ["Pages render", "API integration works"],
+            assignee: "FrontendDeveloper",
+          },
+        ],
+        testTaskDependencies: {
+          TE1: ["T2"],
+          TE2: ["T2", "T4"],
+          TE3: ["T4"],
         },
-        {
-          id: "T2",
-          title: "Implement REST API",
-          description: "Build Hono routes and handlers.",
-          tag: "backend",
-          dependencies: ["T1"],
-          acceptanceCriteria: ["All endpoints respond 200", "Input validation works"],
-          assignee: "BackendDeveloper",
-        },
-        {
-          id: "T3",
-          title: "Design UI mockups",
-          description: "Create Figma-style design descriptions.",
-          tag: "design",
-          dependencies: [],
-          acceptanceCriteria: ["Design system defined", "All screens covered"],
-          assignee: "Designer",
-        },
-        {
-          id: "T4",
-          title: "Implement web frontend",
-          description: "Build React components and pages.",
-          tag: "frontend",
-          dependencies: ["T3", "T2"],
-          acceptanceCriteria: ["Pages render", "API integration works"],
-          assignee: "FrontendDeveloper",
-        },
-      ]);
+      });
     }
 
     if (lowerSystem.includes("test developer")) {
       return JSON.stringify({
         tests: [
-          "User can sign up and log in",
-          "User can create and list resources",
-          "UI renders on mobile and desktop",
+          "tests/e2e/auth.spec.ts — User can sign up and log in",
+          "tests/e2e/resources.spec.ts — User can create and list resources",
+          "tests/e2e/responsive.spec.ts — UI renders on mobile and desktop",
+        ],
+        files: [
+          {
+            path: "tests/e2e/auth.spec.ts",
+            covers: "User can sign up and log in",
+            code: "import { test, expect } from 'bun:test';\n\ntest('user can sign up and log in', () => {\n  expect(true).toBe(true);\n});",
+          },
+          {
+            path: "tests/e2e/resources.spec.ts",
+            covers: "User can create and list resources",
+            code: "import { test, expect } from 'bun:test';\n\ntest('user can create and list resources', () => {\n  expect(true).toBe(true);\n});",
+          },
+          {
+            path: "tests/e2e/responsive.spec.ts",
+            covers: "UI renders on mobile and desktop",
+            code: "import { test, expect } from 'bun:test';\n\ntest('ui renders on mobile and desktop', () => {\n  expect(true).toBe(true);\n});",
+          },
+        ],
+        testTasks: [
+          {
+            id: "TE1",
+            title: "E2E: User authentication",
+            description: "Cover the user sign up and log in journey",
+            tag: "test",
+            dependencies: [],
+            acceptanceCriteria: ["tests/e2e/auth.spec.ts exists", "Test passes locally", "Covers sign up and log in"],
+            assignee: "TestDeveloper",
+            testFile: "tests/e2e/auth.spec.ts",
+          },
+          {
+            id: "TE2",
+            title: "E2E: Resource management",
+            description: "Cover creating and listing resources",
+            tag: "test",
+            dependencies: [],
+            acceptanceCriteria: ["tests/e2e/resources.spec.ts exists", "Test passes locally", "Covers resource CRUD"],
+            assignee: "TestDeveloper",
+            testFile: "tests/e2e/resources.spec.ts",
+          },
+          {
+            id: "TE3",
+            title: "E2E: Responsive rendering",
+            description: "Cover UI rendering on mobile and desktop",
+            tag: "test",
+            dependencies: [],
+            acceptanceCriteria: ["tests/e2e/responsive.spec.ts exists", "Test passes locally", "Covers responsive breakpoints"],
+            assignee: "TestDeveloper",
+            testFile: "tests/e2e/responsive.spec.ts",
+          },
         ],
       });
     }
@@ -663,7 +725,9 @@ class ProjectManager extends Agent {
   protected async run(ctx: WorkflowContext): Promise<void> {
     if (!ctx.architecture) throw new Error("Architecture document is missing");
 
-    const system = `You are a project manager. Given a requirement and architecture, break the work down into a dependency-ordered task list.
+    const preDesignedTestTasks = ctx.testTasks;
+
+    const system = `You are a project manager. Given a requirement, architecture, and a set of pre-designed test tasks, break the work down into a dependency-ordered implementation task list.
 Return ONLY a JSON array of tasks in this exact shape:
 [
   {
@@ -679,29 +743,43 @@ Return ONLY a JSON array of tasks in this exact shape:
 Tag rules:
 - Assign each task the tag that matches its actual work: "backend", "frontend", or "design".
 - Use "design" ONLY for tasks with genuine design work (UX/UI design, visual assets). Many tasks need no design at all — do not invent design tasks for them.
-- NEVER create tasks for writing or running tests: testing is designed and executed separately by the Test Developer in a dedicated phase.
-- Use dependency ids that reference earlier tasks.`;
+- NEVER create additional test tasks: testing has already been designed in the previous phase and the test tasks are provided to you below.
+- Use dependency ids that reference earlier tasks.
 
-    const user = `Requirement:\n${ctx.requirement!.refined}\n\nArchitecture:\n${
+Test task wiring rules:
+- The provided test tasks already exist. You must decide which implementation tasks each test task depends on, and output a separate dependency mapping.
+- A test task should depend only on the implementation task(s) whose functionality it validates.
+- Do not include the test tasks themselves in the main task array; output them only in the "testTaskDependencies" field.`;
+
+    const user = `Requirement:\n${ctx.requirement!.refined}\n\nScope: ${ctx.requirement!.scope.join(", ")}\n\nArchitecture:\n${
       ctx.architecture.overview
-    }\nComponents: ${ctx.architecture.components.join(", ")}\nTech stack: ${ctx.architecture.techStack.join(", ")}
-${ctx.feedback ? `User revision feedback: ${ctx.feedback}` : ""}`;
+    }\nComponents: ${ctx.architecture.components.join(", ")}\nTech stack: ${ctx.architecture.techStack.join(", ")}\n\nPre-designed test tasks (MUST be preserved and wired into the plan):\n${preDesignedTestTasks.length > 0
+      ? preDesignedTestTasks.map((t) => `- ${t.id}: ${t.title} — ${t.description}`).join("\n")
+      : "(none — still produce a valid implementation task list)"}
+${ctx.feedback ? `\nUser revision feedback: ${ctx.feedback}` : ""}
+
+Return ONLY a JSON object in this shape:
+{
+  "tasks": [ /* implementation tasks only */ ],
+  "testTaskDependencies": { "TE1": ["T1", "T2"], "TE2": ["T3"] }
+}`;
 
     const raw = await this.llm.complete(system, user);
     const parsed = extractJsonBlock(raw);
-    const taskArray = Array.isArray(parsed)
+
+    const implArray = Array.isArray(parsed)
       ? parsed
       : Array.isArray(parsed.tasks)
       ? parsed.tasks
       : null;
 
-    if (!taskArray) {
+    if (!implArray) {
       throw new Error(
         `ProjectManager expected a JSON array of tasks, got: ${JSON.stringify(parsed).slice(0, 200)}`
       );
     }
 
-    ctx.tasks = taskArray.map((t: any) => ({
+    const implementationTasks: Task[] = implArray.map((t: any) => ({
       id: String(t.id),
       title: String(t.title),
       description: String(t.description),
@@ -717,6 +795,20 @@ ${ctx.feedback ? `User revision feedback: ${ctx.feedback}` : ""}`;
       validationErrors: [],
       retryCount: 0,
     }));
+
+    // Merge in the pre-designed test tasks, wiring dependencies from the PM response.
+    const dependencyMapping = parsed && typeof parsed.testTaskDependencies === "object"
+      ? (parsed.testTaskDependencies as Record<string, string[]>)
+      : {};
+
+    const mergedTestTasks: Task[] = preDesignedTestTasks.map((testTask) => ({
+      ...testTask,
+      dependencies: Array.isArray(dependencyMapping[testTask.id])
+        ? dependencyMapping[testTask.id].map(String)
+        : [],
+    }));
+
+    ctx.tasks = [...implementationTasks, ...mergedTestTasks];
   }
 
   formatOutput(ctx: WorkflowContext): string {
@@ -743,46 +835,114 @@ class TestDeveloper extends Agent {
   }
 
   protected async run(ctx: WorkflowContext, task?: Task): Promise<void> {
-    const system = `You are a test developer. Given a project requirement and architecture, write end-to-end tests for the project.
+    if (task) {
+      // Test tasks are generated in their own phase before implementation planning.
+      // If a test task is reached during the implementation loop, its code has
+      // already been produced; just mark it done.
+      task.status = "done";
+      task.output = task.output || `Test code already generated in test-design phase`;
+      return;
+    }
 
-You are running inside the project's codebase. ACTUALLY CREATE the e2e test files on disk — do not just print code in your reply.
+    const system = `You are a test developer. Given a project requirement and architecture, design tests that cover ALL functional points of the requirement.
+
+You are running inside the project's codebase. ACTUALLY CREATE the test files on disk — do not just print code in your reply.
 - Follow the project's existing test framework and conventions if it has any (e.g. playwright, vitest, bun test). Otherwise create the tests under tests/e2e/ using Playwright.
-- Cover the critical user journeys from the requirement.
+- Cover EVERY functional point / user journey from the requirement. Do not skip any scope item.
 - Write runnable tests against the interfaces described in the architecture.
 
-After writing all files, return ONLY a JSON object listing what you created, in this shape:
+After writing all files, return ONLY a JSON object in this shape:
 {
   "files": [
-    {"path": "tests/e2e/login.spec.ts", "covers": "short description of what this file tests"}
+    {
+      "path": "tests/e2e/login.spec.ts",
+      "covers": "short description of what this file tests",
+      "code": "full test file source code as a string"
+    }
+  ],
+  "testTasks": [
+    {
+      "id": "TE1",
+      "title": "E2E: short title",
+      "description": "what functional point this task covers",
+      "tag": "test",
+      "dependencies": [],
+      "acceptanceCriteria": ["Test file exists", "Test passes locally", "Covers ..."],
+      "assignee": "TestDeveloper",
+      "testFile": "tests/e2e/login.spec.ts"
+    }
   ]
-}`;
+}
 
-    const user = task
-      ? `Task: ${task.title}\n${task.description}`
-      : `Requirement:\n${ctx.requirement!.refined}\n\nArchitecture:\n${
-          ctx.architecture!.overview
-        }\n${
-          ctx.feedback
-            ? `User revision feedback: ${ctx.feedback}\nRevise the existing test files on disk accordingly, then return the updated JSON summary.`
-            : ""
-        }`;
+Rules:
+- Generate one test task per functional point / user journey. All functional points in the requirement must be covered.
+- Each test task must correspond to one file in "files" via the "testFile" field.
+- Set dependencies to [] for now; the PM will wire them to the implementation tasks they validate.`;
+
+    const user = `Requirement:\n${ctx.requirement!.refined}\n\nScope: ${ctx.requirement!.scope.join(", ")}\n\nArchitecture:\n${ctx.architecture!.overview}\nComponents: ${ctx.architecture!.components.join(", ")}\nTech stack: ${ctx.architecture!.techStack.join(", ")}\n${
+      ctx.feedback
+        ? `\nUser revision feedback: ${ctx.feedback}\nRevise the existing test files on disk accordingly, then return the updated JSON summary.`
+        : ""
+    }`;
 
     const raw = await this.llm.complete(system, user);
     const parsed = extractJsonBlock(raw);
-    if (Array.isArray(parsed.files)) {
-      ctx.tests = parsed.files.map((f: any) => {
-        const path = String(f?.path ?? f);
-        const covers = f?.covers ? ` — ${String(f.covers)}` : "";
-        return `${path}${covers}`;
-      });
-    } else {
-      // Fallback for the mock client and older responses: plain descriptions.
-      ctx.tests = Array.isArray(parsed.tests) ? parsed.tests.map(String) : [];
+
+    const files = Array.isArray(parsed.files) ? parsed.files : [];
+    const testTasksInput = Array.isArray(parsed.testTasks) ? parsed.testTasks : [];
+
+    ctx.tests = files.map((f: any) => {
+      const path = String(f?.path ?? f);
+      const covers = f?.covers ? ` — ${String(f.covers)}` : "";
+      return `${path}${covers}`;
+    });
+
+    const codeByPath = new Map<string, string>();
+    for (const f of files) {
+      const path = String(f?.path ?? "");
+      const code = f?.code ? String(f.code) : "";
+      if (path && code) codeByPath.set(path, code);
     }
+
+    ctx.testTasks = testTasksInput.map((t: any, idx: number) => {
+      const testFile = t?.testFile ? String(t.testFile) : "";
+      const code = testFile ? codeByPath.get(testFile) || "" : "";
+      const task: Task = {
+        id: String(t?.id ?? `TE${idx + 1}`),
+        title: String(t?.title ?? `Test task ${idx + 1}`),
+        description: String(t?.description ?? ""),
+        tag: "test",
+        dependencies: Array.isArray(t?.dependencies)
+          ? t.dependencies.map(String)
+          : [],
+        acceptanceCriteria: Array.isArray(t?.acceptanceCriteria)
+          ? t.acceptanceCriteria.map(String)
+          : ["Test file exists", "Test passes locally"],
+        assignee: String(t?.assignee ?? "TestDeveloper"),
+        status: "done",
+        artifacts: testFile && code ? [{ name: testFile, content: code }] : [],
+        output: `Generated test code${testFile ? ` at ${testFile}` : ""}`,
+        validationErrors: [],
+        retryCount: 0,
+      };
+      return task;
+    });
   }
 
   formatOutput(ctx: WorkflowContext): string {
-    return ctx.tests.map((t, i) => `${i + 1}. ${t}`).join("\n");
+    const lines = [
+      "测试文件：",
+      ...ctx.tests.map((t, i) => `  ${i + 1}. ${t}`),
+      "",
+      "测试任务：",
+      ...ctx.testTasks.map(
+        (task) =>
+          `  ${task.id}: ${task.title}\n    描述：${task.description}\n    验收标准：\n${task.acceptanceCriteria
+            .map((c) => `      - ${c}`)
+            .join("\n")}`
+      ),
+    ];
+    return lines.join("\n");
   }
 }
 
@@ -988,6 +1148,7 @@ export class WorkflowContext {
   requirement: RequirementDoc | null = null;
   architecture: ArchitectureDoc | null = null;
   tasks: Task[] = [];
+  testTasks: Task[] = [];
   tests: string[] = [];
   finalStatus: "success" | "failure" = "success";
   feedback = "";
@@ -1067,19 +1228,19 @@ export class WorkflowEngine {
         (c) => this.agents.Architect.formatOutput(c)
       );
 
-      await this.reviewablePhase(
-        ctx,
-        this.agents.ProjectManager,
-        "项目经理",
-        (c) => this.agents.ProjectManager.formatOutput(c)
-      );
-
       log("WorkflowEngine", "==== Phase 2: Test Design ====");
       await this.reviewablePhase(
         ctx,
         this.agents.TestDeveloper,
         "测试开发",
         (c) => this.agents.TestDeveloper.formatOutput(c)
+      );
+
+      await this.reviewablePhase(
+        ctx,
+        this.agents.ProjectManager,
+        "项目经理",
+        (c) => this.agents.ProjectManager.formatOutput(c)
       );
 
       log("WorkflowEngine", "==== Phase 3: Implementation ====");
@@ -1130,6 +1291,7 @@ export class WorkflowEngine {
         requirement: ctx.requirement!,
         architecture: ctx.architecture!,
         tasks: ctx.tasks,
+        testTasks: ctx.testTasks,
         tests: ctx.tests,
         finalStatus: ctx.finalStatus,
       };
@@ -1149,7 +1311,7 @@ export class WorkflowEngine {
       (agent instanceof RequirementAnalyst && ctx.requirement !== null) ||
       (agent instanceof Architect && ctx.architecture !== null) ||
       (agent instanceof ProjectManager && ctx.tasks.length > 0) ||
-      (agent instanceof TestDeveloper && ctx.tests.length > 0);
+      (agent instanceof TestDeveloper && ctx.testTasks.length > 0);
 
     if (alreadyDone) {
       log(label, "skipping, already done (loaded from state)");
