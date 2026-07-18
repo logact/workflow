@@ -6,7 +6,15 @@
  * Use `--mock-llm` to run without real LLM calls (for flow verification).
  */
 
-import { writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
@@ -132,9 +140,19 @@ function extractCodeBlock(text: string, language?: string): string {
   return text.trim();
 }
 
-function saveState(ctx: WorkflowContext, path = "workflow-state.json"): void {
-  const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+const RUNS_DIR = "runs";
+
+function statePathFor(id: string): string {
+  return join(RUNS_DIR, id, "state.json");
+}
+
+function outputPathFor(id: string): string {
+  return join(RUNS_DIR, id, "output.json");
+}
+
+function saveState(ctx: WorkflowContext, path: string): void {
   const serializable = {
+    id: ctx.id,
     userRequirement: ctx.userRequirement,
     requirement: ctx.requirement,
     architecture: ctx.architecture,
@@ -143,16 +161,22 @@ function saveState(ctx: WorkflowContext, path = "workflow-state.json"): void {
     finalStatus: ctx.finalStatus,
     feedback: ctx.feedback,
   };
-  writeFileSync(path, JSON.stringify(serializable, null, 2));
+  // Write-then-rename so a crash mid-write cannot corrupt the saved state.
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(serializable, null, 2));
+  renameSync(tmp, path);
 }
 
-function loadState(path = "workflow-state.json"): WorkflowContext | null {
-  const { readFileSync, existsSync } = require("node:fs") as typeof import("node:fs");
+function loadState(path: string): WorkflowContext | null {
   if (!existsSync(path)) return null;
   try {
     const raw = readFileSync(path, "utf-8");
     const parsed = JSON.parse(raw) as Partial<WorkflowContext>;
-    const ctx = new WorkflowContext(parsed.userRequirement || "");
+    const ctx = new WorkflowContext(
+      parsed.userRequirement || "",
+      parsed.id || randomUUID()
+    );
     ctx.requirement = parsed.requirement ?? null;
     ctx.architecture = parsed.architecture ?? null;
     ctx.tasks = parsed.tasks ?? [];
@@ -164,6 +188,71 @@ function loadState(path = "workflow-state.json"): WorkflowContext | null {
     console.warn(`Failed to load state from ${path}:`, err);
     return null;
   }
+}
+
+const REWIND_PHASES = ["requirement", "architect", "pm", "test"] as const;
+type RewindPhase = (typeof REWIND_PHASES)[number];
+
+/**
+ * Rewind a resumed workflow to a specific step so that step (and everything
+ * downstream of it) runs again instead of being skipped.
+ */
+function rewindContext(ctx: WorkflowContext, from: string): void {
+  const phaseAliases: Record<string, RewindPhase> = {
+    requirement: "requirement",
+    architect: "architect",
+    architecture: "architect",
+    pm: "pm",
+    tasks: "pm",
+    test: "test",
+    tests: "test",
+  };
+  const phase = phaseAliases[from.toLowerCase()];
+  if (phase) {
+    const idx = REWIND_PHASES.indexOf(phase);
+    if (idx <= 0) ctx.requirement = null;
+    if (idx <= 1) ctx.architecture = null;
+    if (idx <= 2) ctx.tasks = [];
+    if (idx <= 3) ctx.tests = [];
+    ctx.feedback = "";
+    log(
+      "WorkflowEngine",
+      `rewound to phase "${phase}", downstream state cleared`
+    );
+    return;
+  }
+
+  const task = ctx.tasks.find((t) => t.id === from);
+  if (!task) {
+    throw new Error(
+      `Unknown --from step "${from}". Use one of: requirement, architect, pm, test, or a task id (e.g. T3).`
+    );
+  }
+
+  // Reset the task itself plus every task that transitively depends on it.
+  const toReset = new Set<string>([task.id]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const t of ctx.tasks) {
+      if (!toReset.has(t.id) && t.dependencies.some((d) => toReset.has(d))) {
+        toReset.add(t.id);
+        grew = true;
+      }
+    }
+  }
+  for (const t of ctx.tasks) {
+    if (!toReset.has(t.id)) continue;
+    t.status = "pending";
+    t.artifacts = [];
+    t.output = "";
+    t.validationErrors = [];
+    t.retryCount = 0;
+  }
+  log(
+    "WorkflowEngine",
+    `rewound to task ${task.id}, reset tasks: ${[...toReset].join(", ")}`
+  );
 }
 
 // ============================================================================
@@ -186,7 +275,7 @@ class RealKimiCLIClient implements KimiCLIClient {
       ? Number(process.env.KIMI_TIMEOUT_MS)
       : NaN;
     this.timeoutMs =
-      timeoutMs ?? (Number.isFinite(envTimeout) ? envTimeout : 600_000);
+      timeoutMs ?? (Number.isFinite(envTimeout) ? envTimeout : 1_800_000);
     this.workspaceDir = workspaceDir;
   }
 
@@ -206,7 +295,9 @@ class RealKimiCLIClient implements KimiCLIClient {
       }
     );
 
+    let timedOut = false;
     const timeout = setTimeout(() => {
+      timedOut = true;
       proc.kill("SIGTERM");
     }, this.timeoutMs);
 
@@ -218,6 +309,11 @@ class RealKimiCLIClient implements KimiCLIClient {
       ]);
       const exitCode = proc.exitCode;
 
+      if (timedOut) {
+        throw new Error(
+          `kimi CLI timed out after ${this.timeoutMs}ms and was killed. Increase the limit with KIMI_TIMEOUT_MS or --timeout.`
+        );
+      }
       if (exitCode !== 0) {
         throw new Error(
           `kimi CLI exited with ${exitCode}. stderr: ${stderrText.slice(0, 500)}`
@@ -249,7 +345,7 @@ class RealKimiCLIClient implements KimiCLIClient {
   }
 }
 
-class MockKimiCLIClient implements KimiCLIClient {
+export class MockKimiCLIClient implements KimiCLIClient {
   async complete(systemPrompt: string, userPrompt: string): Promise<string> {
     await sleep(50);
     const lowerSystem = systemPrompt.toLowerCase();
@@ -304,15 +400,6 @@ class MockKimiCLIClient implements KimiCLIClient {
           dependencies: ["T3", "T2"],
           acceptanceCriteria: ["Pages render", "API integration works"],
           assignee: "FrontendDeveloper",
-        },
-        {
-          id: "T5",
-          title: "Write E2E tests",
-          description: "Cover critical user journeys with E2E tests.",
-          tag: "test",
-          dependencies: ["T4"],
-          acceptanceCriteria: ["Tests run locally", "Critical paths covered"],
-          assignee: "TestDeveloper",
         },
       ]);
     }
@@ -436,6 +523,34 @@ class UserInterface {
     return lines.join("\n");
   }
 
+  /**
+   * Decide whether a failed phase should be retried. In yes-mode the decision
+   * is automatic and bounded by maxAutoRetries; otherwise the user is asked.
+   */
+  async shouldRetryAfterError(
+    label: string,
+    errorMessage: string,
+    failureCount: number,
+    maxAutoRetries: number
+  ): Promise<boolean> {
+    if (this.yesMode) {
+      const retry = failureCount <= maxAutoRetries;
+      log(
+        "User",
+        retry
+          ? `[auto-retry] ${label} (failure ${failureCount}/${maxAutoRetries})`
+          : `[auto-abort] ${label} after ${failureCount} failures`
+      );
+      return retry;
+    }
+
+    console.log(`\n【${label}】执行失败：${errorMessage}`);
+    const answer = await this.ask(
+      "输入 r 重试，其他任意键退出（进度已保存，可用 --resume 恢复）："
+    );
+    return answer.toLowerCase().startsWith("r");
+  }
+
   close(): void {
     this.rl.close();
   }
@@ -555,13 +670,17 @@ Return ONLY a JSON array of tasks in this exact shape:
     "id": "T1",
     "title": "string",
     "description": "string",
-    "tag": "backend|frontend|design|test",
+    "tag": "backend|frontend|design",
     "dependencies": [],
     "acceptanceCriteria": ["string", ...],
     "assignee": "string"
   }
 ]
-Use tags backend, frontend, design, or test. Use dependency ids that reference earlier tasks.`;
+Tag rules:
+- Assign each task the tag that matches its actual work: "backend", "frontend", or "design".
+- Use "design" ONLY for tasks with genuine design work (UX/UI design, visual assets). Many tasks need no design at all — do not invent design tasks for them.
+- NEVER create tasks for writing or running tests: testing is designed and executed separately by the Test Developer in a dedicated phase.
+- Use dependency ids that reference earlier tasks.`;
 
     const user = `Requirement:\n${ctx.requirement!.refined}\n\nArchitecture:\n${
       ctx.architecture.overview
@@ -624,21 +743,42 @@ class TestDeveloper extends Agent {
   }
 
   protected async run(ctx: WorkflowContext, task?: Task): Promise<void> {
-    const system = `You are a test developer. Given a project requirement and architecture, design end-to-end test cases.
-Return ONLY a JSON object in this shape:
+    const system = `You are a test developer. Given a project requirement and architecture, write end-to-end tests for the project.
+
+You are running inside the project's codebase. ACTUALLY CREATE the e2e test files on disk — do not just print code in your reply.
+- Follow the project's existing test framework and conventions if it has any (e.g. playwright, vitest, bun test). Otherwise create the tests under tests/e2e/ using Playwright.
+- Cover the critical user journeys from the requirement.
+- Write runnable tests against the interfaces described in the architecture.
+
+After writing all files, return ONLY a JSON object listing what you created, in this shape:
 {
-  "tests": ["string", "string", ...]
+  "files": [
+    {"path": "tests/e2e/login.spec.ts", "covers": "short description of what this file tests"}
+  ]
 }`;
 
     const user = task
       ? `Task: ${task.title}\n${task.description}`
       : `Requirement:\n${ctx.requirement!.refined}\n\nArchitecture:\n${
           ctx.architecture!.overview
-        }\n${ctx.feedback ? `User revision feedback: ${ctx.feedback}` : ""}`;
+        }\n${
+          ctx.feedback
+            ? `User revision feedback: ${ctx.feedback}\nRevise the existing test files on disk accordingly, then return the updated JSON summary.`
+            : ""
+        }`;
 
     const raw = await this.llm.complete(system, user);
     const parsed = extractJsonBlock(raw);
-    ctx.tests = Array.isArray(parsed.tests) ? parsed.tests.map(String) : [];
+    if (Array.isArray(parsed.files)) {
+      ctx.tests = parsed.files.map((f: any) => {
+        const path = String(f?.path ?? f);
+        const covers = f?.covers ? ` — ${String(f.covers)}` : "";
+        return `${path}${covers}`;
+      });
+    } else {
+      // Fallback for the mock client and older responses: plain descriptions.
+      ctx.tests = Array.isArray(parsed.tests) ? parsed.tests.map(String) : [];
+    }
   }
 
   formatOutput(ctx: WorkflowContext): string {
@@ -842,7 +982,8 @@ Return the fixed artifact inside a markdown code block.`;
 // Workflow context & engine
 // ============================================================================
 
-class WorkflowContext {
+export class WorkflowContext {
+  id: string;
   userRequirement = "";
   requirement: RequirementDoc | null = null;
   architecture: ArchitectureDoc | null = null;
@@ -851,12 +992,13 @@ class WorkflowContext {
   finalStatus: "success" | "failure" = "success";
   feedback = "";
 
-  constructor(requirement: string) {
+  constructor(requirement: string, id: string = randomUUID()) {
     this.userRequirement = requirement;
+    this.id = id;
   }
 }
 
-class WorkflowEngine {
+export class WorkflowEngine {
   private readonly agents: {
     RequirementAnalyst: RequirementAnalyst;
     Architect: Architect;
@@ -872,10 +1014,12 @@ class WorkflowEngine {
   };
 
   private readonly maxRetries = 2;
+  // Auto-retries for a failed planning-phase LLM call in non-interactive mode.
+  private readonly maxPhaseRetries = 2;
   private readonly ui: UserInterface;
   private readonly statePath: string;
 
-  constructor(llm: KimiCLIClient, yesMode = false, statePath = "workflow-state.json") {
+  constructor(llm: KimiCLIClient, statePath: string, yesMode = false) {
     this.ui = new UserInterface(yesMode);
     this.statePath = statePath;
     this.agents = {
@@ -898,19 +1042,12 @@ class WorkflowEngine {
   }
 
   async run(
-    requirement: string,
-    options: { fresh?: boolean } = {}
+    ctx: WorkflowContext,
+    options: { from?: string | null } = {}
   ): Promise<WorkflowResult> {
-    const resumed = options.fresh ? null : loadState(this.statePath);
-    const ctx =
-      resumed && resumed.userRequirement === requirement
-        ? resumed
-        : new WorkflowContext(requirement);
-
-    if (resumed && resumed.userRequirement === requirement) {
-      log("WorkflowEngine", `resuming workflow from ${this.statePath}`);
-    } else if (resumed && resumed.userRequirement !== requirement) {
-      log("WorkflowEngine", `state requirement mismatch, starting fresh`);
+    if (options.from) {
+      rewindContext(ctx, options.from);
+      this.save(ctx);
     }
 
     try {
@@ -1019,8 +1156,26 @@ class WorkflowEngine {
       return;
     }
 
+    let failures = 0;
     while (true) {
-      await agent.execute(ctx);
+      try {
+        await agent.execute(ctx);
+      } catch (err) {
+        failures += 1;
+        const msg = err instanceof Error ? err.message : String(err);
+        log(label, `execution failed (failure ${failures}): ${msg}`);
+        const retry = await this.ui.shouldRetryAfterError(
+          label,
+          msg,
+          failures,
+          this.maxPhaseRetries
+        );
+        if (retry) continue;
+        throw new Error(
+          `Phase "${label}" aborted: ${msg}. Progress is saved; resume with --resume.`
+        );
+      }
+      failures = 0;
       this.save(ctx);
       const action = await this.ui.review(label, formatter(ctx));
 
@@ -1158,54 +1313,135 @@ class WorkflowEngine {
 // Entry point
 // ============================================================================
 
-function parseArgs(
-  argv: string[]
-): { requirement: string; yesMode: boolean; mockLlm: boolean; fresh: boolean } {
+interface CliOptions {
+  requirement: string;
+  requirementProvided: boolean;
+  yesMode: boolean;
+  mockLlm: boolean;
+  fresh: boolean;
+  resumeId: string | null;
+  fromStep: string | null;
+  timeoutMs: number | null;
+}
+
+function parseArgs(argv: string[]): CliOptions {
   const args = argv.slice(2);
-  const yesMode = args.includes("-y") || args.includes("--yes");
-  const mockLlm = args.includes("--mock-llm");
-  const fresh = args.includes("--fresh");
-  const positional = args.filter(
-    (a) =>
-      !a.startsWith("-") ||
-      (a !== "-y" && a !== "--yes" && a !== "--mock-llm" && a !== "--fresh")
-  );
+  let yesMode = false;
+  let mockLlm = false;
+  let fresh = false;
+  let resumeId: string | null = null;
+  let fromStep: string | null = null;
+  let timeoutMs: number | null = null;
+  const positional: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "-y" || a === "--yes") yesMode = true;
+    else if (a === "--mock-llm") mockLlm = true;
+    else if (a === "--fresh") fresh = true;
+    else if (a === "--resume") resumeId = args[++i] ?? null;
+    else if (a.startsWith("--resume=")) resumeId = a.slice("--resume=".length);
+    else if (a === "--from") fromStep = args[++i] ?? null;
+    else if (a.startsWith("--from=")) fromStep = a.slice("--from=".length);
+    else if (a === "--timeout") timeoutMs = Number(args[++i]);
+    else if (a.startsWith("--timeout="))
+      timeoutMs = Number(a.slice("--timeout=".length));
+    else positional.push(a);
+  }
+
+  const requirementProvided = positional.length > 0;
   const requirement =
     positional.join(" ") ||
     "Build a simple task management web app where users can create, edit, and mark tasks as complete.";
-  return { requirement, yesMode, mockLlm, fresh };
+  return {
+    requirement,
+    requirementProvided,
+    yesMode,
+    mockLlm,
+    fresh,
+    resumeId,
+    fromStep,
+    timeoutMs,
+  };
 }
 
 async function main() {
-  const { requirement, yesMode, mockLlm, fresh } = parseArgs(process.argv);
+  const opts = parseArgs(process.argv);
+
+  if (
+    opts.timeoutMs !== null &&
+    (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs <= 0)
+  ) {
+    console.error("Invalid --timeout value; expected a positive number of milliseconds.");
+    process.exit(1);
+  }
 
   console.log("\n==============================================");
   console.log("Multi-Agent Workflow Orchestrator");
   console.log("==============================================\n");
-  console.log(`User requirement: ${requirement}`);
-  if (mockLlm) {
+
+  let ctx: WorkflowContext;
+  if (opts.resumeId) {
+    const loaded = loadState(statePathFor(opts.resumeId));
+    if (!loaded) {
+      console.error(
+        `No saved workflow found for id "${opts.resumeId}" (expected ${statePathFor(opts.resumeId)}).`
+      );
+      process.exit(1);
+    }
+    ctx = loaded;
+    if (opts.requirementProvided && opts.requirement !== ctx.userRequirement) {
+      console.warn(
+        "Warning: ignoring the requirement argument; using the saved requirement of the resumed workflow."
+      );
+    }
+    if (opts.fresh) {
+      // Keep the id so the restart overwrites this workflow's state in place.
+      ctx = new WorkflowContext(ctx.userRequirement, ctx.id);
+      console.log("Mode: fresh restart of existing workflow (state cleared)");
+    } else {
+      console.log(`Mode: resume workflow ${ctx.id}`);
+    }
+  } else {
+    if (opts.fromStep) {
+      console.error("--from requires --resume <id>.");
+      process.exit(1);
+    }
+    ctx = new WorkflowContext(opts.requirement);
+  }
+
+  console.log(`Workflow ID: ${ctx.id}`);
+  console.log(`User requirement: ${ctx.userRequirement}`);
+  console.log(`State: ${statePathFor(ctx.id)}`);
+  console.log(`Resume with: bun run workflow --resume ${ctx.id}\n`);
+
+  if (opts.fromStep) {
+    console.log(`Rewind: re-run from step "${opts.fromStep}"\n`);
+  }
+  if (opts.mockLlm) {
     console.log("Mode: mock LLM (no real Kimi calls)\n");
-  } else if (yesMode) {
+  } else if (opts.yesMode) {
     console.log("Mode: non-interactive with real Kimi CLI calls\n");
   } else {
     console.log("Mode: interactive with real Kimi CLI calls\n");
   }
-  if (fresh) {
-    console.log("Mode: fresh start (ignore workflow-state.json)\n");
-  }
 
-  const llm: KimiCLIClient = mockLlm
+  const llm: KimiCLIClient = opts.mockLlm
     ? new MockKimiCLIClient()
-    : new RealKimiCLIClient();
+    : new RealKimiCLIClient(opts.timeoutMs ?? undefined);
 
-  const engine = new WorkflowEngine(llm, yesMode);
-  const result = await engine.run(requirement, { fresh });
+  const engine = new WorkflowEngine(llm, statePathFor(ctx.id), opts.yesMode);
+  const result = await engine.run(ctx, { from: opts.fromStep });
 
-  writeFileSync("workflow-output.json", JSON.stringify(result, null, 2));
-  console.log("\nResult written to workflow-output.json");
+  const outPath = outputPathFor(ctx.id);
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, JSON.stringify(result, null, 2));
+  console.log(`\nResult written to ${outPath}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

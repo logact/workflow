@@ -6,6 +6,9 @@ out
 dist
 *.tgz
 
+# workflow run state
+runs/
+
 # code coverage
 coverage
 *.lcov
